@@ -1,117 +1,49 @@
 require 'aws-sdk-cloudwatchlogs'
 require 'aws-sdk-cognitoidentity'
 require 'aws-sdk-sts'
-require 'net/http'
-require 'uri'
 require 'time'
 require 'json'
 require 'colorize'
 require 'optimist'
 
 class CloudWatchLogStreamer
-  TOKEN_REFRESH_THRESHOLD = 300 # Refresh token if it expires in less than 5 minutes
-  POLL_INTERVAL = 2.0
+  POLL_INTERVAL = 1.0
   MAX_STREAMS = 10
   LOG_HISTORY_MINUTES = 5
 
   def initialize(options)
     @log_group_name = options[:log_group_name]
-    @auth_server_url = options[:auth_url]
-    @username = options[:username]
-    @password = options[:password]
     @identity_pool_id = options[:identity_pool_id]
-    @region = @identity_pool_id&.split(':')&.first || 'us-east-1'
+    @region = options[:region] || @identity_pool_id&.split(':')&.first || 'us-east-1'
     @poll_interval = options[:poll_interval] || POLL_INTERVAL
     @max_streams = options[:max_streams] || MAX_STREAMS
     @verbose = options[:verbose] || false
     @show_stream_name = options[:show_stream] || false
     @minutes = options[:minutes] || LOG_HISTORY_MINUTES
     @last_ingested_map = {}
-    @tokens = nil
     @backoff_sleep = 1
     
-    authenticate
+    setup_cloudwatch_client
     colorize_log_levels
   end
   
-  def authenticate
-    log "Authenticating with auth server..." if @verbose
-    
-    uri = URI("#{@auth_server_url}/auth/sign_in")
-    request = Net::HTTP::Post.new(uri, 'Content-Type' => 'application/json')
-    request.body = { username: @username, password: @password }.to_json
-    
-    response = make_http_request(uri, request)
-    
-    unless response.is_a?(Net::HTTPSuccess)
-      raise "Authentication failed: #{response.body}"
-    end
-    
-    @tokens = JSON.parse(response.body)
-    log "Successfully authenticated" if @verbose
-    
-    setup_cloudwatch_client
-  end
-  
-  def make_http_request(uri, request)
-    http = Net::HTTP.new(uri.hostname, uri.port)
-    http.use_ssl = uri.scheme == 'https'
-    http.request(request)
-  end
-  
-  def refresh_tokens
-    return if @tokens.nil? || !@tokens['refresh_token']
-    
-    log "Refreshing tokens..." if @verbose
-    
-    uri = URI("#{@auth_server_url}/auth/refresh_token")
-    request = Net::HTTP::Post.new(uri, 'Content-Type' => 'application/json')
-    request.body = { 
-      refresh_token: @tokens['refresh_token'],
-      username: @username 
-    }.to_json
-    
-    response = make_http_request(uri, request)
-    
-    unless response.is_a?(Net::HTTPSuccess)
-      log "Token refresh failed: #{response.body}" if @verbose
-      # If refresh fails, try full authentication
-      authenticate
-      return
-    end
-    
-    @tokens = JSON.parse(response.body)
-    log "Successfully refreshed tokens" if @verbose
-    @backoff_sleep = 1
-    
-    setup_cloudwatch_client
-  end
-  
   def setup_cloudwatch_client
-    return if @identity_pool_id.nil? || @tokens.nil?
+    return if @identity_pool_id.nil?
 
     log "Setting up CloudWatch client..." if @verbose
     
     cognito_client = Aws::CognitoIdentity::Client.new(region: @region)
     
-    # Extract the user pool ID from the token's issuer
-    id_token = @tokens['id_token']
-    if !id_token
-      raise "Failed to get AWS credentials from auth server"
-    end
-    
+    # Get identity ID from the identity pool (unauthenticated access)
     resp = cognito_client.get_id(
       identity_pool_id: @identity_pool_id,
-      logins: {
-        "cognito-idp.#{@region}.amazonaws.com/#{extract_user_pool_id}" => id_token
-      }
+      logins: {}
     )
     
+    # Get credentials for the identity
     credentials_resp = cognito_client.get_credentials_for_identity(
       identity_id: resp.identity_id,
-      logins: {
-        "cognito-idp.#{@region}.amazonaws.com/#{extract_user_pool_id}" => id_token
-      }
+      logins: {}
     )
     
     credentials = credentials_resp.credentials
@@ -127,21 +59,6 @@ class CloudWatchLogStreamer
     
     log "CloudWatch client setup complete" if @verbose
     verify_log_group
-  end
-  
-  def extract_user_pool_id
-    parts = @tokens['id_token'].split('.')
-    raise "Invalid ID token format" if parts.length < 2
-
-    # Decode the JWT payload
-    payload = JSON.parse(Base64.decode64(parts[1] + '=='))
-    
-    # Extract the user pool ID from the issuer claim
-    iss = payload['iss']
-    user_pool_id = iss.split('/').last
-    
-    log "Extracted user pool ID: #{user_pool_id}" if @verbose
-    user_pool_id
   end
   
   def verify_log_group
@@ -206,7 +123,6 @@ class CloudWatchLogStreamer
     
     loop do
       begin
-        check_token_expiration
         fetch_and_display_logs(start_time)
         sleep @poll_interval
       rescue Interrupt
@@ -216,19 +132,6 @@ class CloudWatchLogStreamer
         warn "Error: #{e.message}".colorize(:red)
         sleep backoff_and_increment
       end
-    end
-  end
-  
-  def check_token_expiration
-    return unless @tokens && @tokens['exp']
-    
-    expiry_time = Time.at(@tokens['exp'])
-    current_time = Time.now
-    
-    # If token expires in less than 5 minutes, refresh it
-    if expiry_time - current_time < TOKEN_REFRESH_THRESHOLD
-      log "Token expiring soon, refreshing..." if @verbose
-      refresh_tokens
     end
   end
   
@@ -279,9 +182,6 @@ if __FILE__ == $PROGRAM_NAME
   opts = Optimist::options do
     banner "Usage: ruby cloudwatch_log_streamer.rb [options]"
     opt :log_group_name, "CloudWatch Log Group Name", type: :string, required: true
-    opt :auth_url, "Authentication Server URL", type: :string, required: true
-    opt :username, "Username for authentication", type: :string, required: true
-    opt :password, "Password for authentication", type: :string, required: true
     opt :identity_pool_id, "Cognito Identity Pool ID", type: :string, required: true
     opt :region, "AWS Region (default: extracted from identity pool ID)", type: :string
     opt :minutes, "Minutes of log history to retrieve", type: :int, default: CloudWatchLogStreamer::LOG_HISTORY_MINUTES

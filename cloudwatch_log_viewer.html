@@ -16,12 +16,20 @@
         .container {
             max-width: 1200px;
             margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
         }
         .header {
             margin-bottom: 20px;
+            flex-shrink: 0;
         }
         .input-group {
             margin-bottom: 15px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
         }
         input[type="text"] {
             padding: 8px;
@@ -30,7 +38,6 @@
             border: 1px solid #3d3d3d;
             color: #d4d4d4;
             border-radius: 4px;
-            margin-right: 10px;
         }
         button {
             padding: 8px 16px;
@@ -39,36 +46,125 @@
             border: none;
             border-radius: 4px;
             cursor: pointer;
-            margin-right: 10px;
         }
         button:hover {
             background-color: #106ebe;
         }
-        .log-container {
+        .log-viewer {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
             background-color: #2d2d2d;
             border-radius: 4px;
+            overflow: hidden;
+        }
+        .log-header {
             padding: 10px;
-            height: 600px;
+            background-color: #252526;
+            border-bottom: 1px solid #3d3d3d;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .log-controls {
+            display: flex;
+            gap: 10px;
+        }
+        .log-container {
+            flex: 1;
             overflow-y: auto;
-            white-space: pre-wrap;
-            word-wrap: break-word;
+            padding: 10px;
+            scroll-behavior: smooth;
         }
         .log-entry {
             margin: 2px 0;
-            padding: 2px 0;
-            border-bottom: 1px solid #3d3d3d;
+            padding: 4px 8px;
+            border-radius: 2px;
+            display: flex;
+            align-items: flex-start;
+            line-height: 1.4;
+        }
+        .log-entry:hover {
+            background-color: #323232;
+        }
+        .log-entry.selected {
+            background-color: #37373d;
         }
         .timestamp {
             color: #569cd6;
+            margin-right: 8px;
+            white-space: nowrap;
         }
-        .error { color: #f14c4c; }
-        .warn { color: #cca700; }
-        .info { color: #6a9955; }
-        .debug { color: #9cdcfe; }
-        .trace { color: #c586c0; }
+        .log-level {
+            padding: 2px 6px;
+            border-radius: 3px;
+            margin-right: 8px;
+            font-size: 0.9em;
+            font-weight: bold;
+            min-width: 60px;
+            text-align: center;
+        }
+        .log-content {
+            flex: 1;
+            word-break: break-word;
+        }
+        .error { 
+            background-color: rgba(241, 76, 76, 0.1);
+            color: #f14c4c;
+        }
+        .warn { 
+            background-color: rgba(204, 167, 0, 0.1);
+            color: #cca700;
+        }
+        .info { 
+            background-color: rgba(106, 153, 85, 0.1);
+            color: #6a9955;
+        }
+        .debug { 
+            background-color: rgba(156, 220, 254, 0.1);
+            color: #9cdcfe;
+        }
+        .trace { 
+            background-color: rgba(197, 134, 192, 0.1);
+            color: #c586c0;
+        }
         .status {
             color: #6a9955;
             margin-bottom: 10px;
+        }
+        .filter-input {
+            padding: 4px 8px;
+            background-color: #3c3c3c;
+            border: 1px solid #3d3d3d;
+            color: #d4d4d4;
+            border-radius: 4px;
+            width: 200px;
+        }
+        .json-content {
+            background-color: #1e1e1e;
+            padding: 8px;
+            border-radius: 4px;
+            margin-top: 4px;
+            overflow-x: auto;
+        }
+        .json-key { color: #9cdcfe; }
+        .json-string { color: #ce9178; }
+        .json-number { color: #b5cea8; }
+        .json-boolean { color: #569cd6; }
+        .json-null { color: #569cd6; }
+        .auto-scroll {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            color: #d4d4d4;
+        }
+        .auto-scroll input[type="checkbox"] {
+            margin: 0;
+        }
+        .log-count {
+            color: #6a9955;
+            font-size: 0.9em;
         }
     </style>
 </head>
@@ -84,12 +180,24 @@
             </div>
             <div id="status" class="status"></div>
         </div>
-        <div id="logContainer" class="log-container"></div>
+        <div class="log-viewer">
+            <div class="log-header">
+                <div class="log-controls">
+                    <input type="text" id="filterInput" class="filter-input" placeholder="Filter logs...">
+                    <div class="auto-scroll">
+                        <input type="checkbox" id="autoScroll" checked>
+                        <label for="autoScroll">Auto-scroll</label>
+                    </div>
+                </div>
+                <div class="log-count" id="logCount">0 logs</div>
+            </div>
+            <div id="logContainer" class="log-container"></div>
+        </div>
     </div>
 
     <script>
         // Constants matching Ruby implementation
-        const POLL_INTERVAL = 2000; // 2 seconds
+        const POLL_INTERVAL = 1000; // 1 second
         const MAX_STREAMS = 10;
         const REGION = 'us-east-1';
         const LOOKBACK_MINUTES = 5;
@@ -99,9 +207,20 @@
         let lastIngestedMap = {};
         let cloudWatchLogs;
         let cognitoClient;
+        let logCount = 0;
+        let autoScroll = true;
 
         // Configure AWS SDK
         AWS.config.region = REGION;
+
+        // Initialize UI controls
+        document.getElementById('autoScroll').addEventListener('change', (e) => {
+            autoScroll = e.target.checked;
+        });
+
+        document.getElementById('filterInput').addEventListener('input', (e) => {
+            filterLogs(e.target.value);
+        });
 
         function updateStatus(message, isError = false) {
             const status = document.getElementById('status');
@@ -109,33 +228,66 @@
             status.style.color = isError ? '#f14c4c' : '#6a9955';
         }
 
+        function updateLogCount() {
+            document.getElementById('logCount').textContent = `${logCount} logs`;
+        }
+
+        function filterLogs(filterText) {
+            const logEntries = document.querySelectorAll('.log-entry');
+            const filterLower = filterText.toLowerCase();
+            
+            logEntries.forEach(entry => {
+                const content = entry.textContent.toLowerCase();
+                entry.style.display = content.includes(filterLower) ? 'flex' : 'none';
+            });
+        }
+
+        function formatJSON(json) {
+            if (typeof json !== 'object') return json;
+            
+            const formatted = JSON.stringify(json, null, 2);
+            return formatted.replace(
+                /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+                match => {
+                    let cls = 'json-number';
+                    if (/^"/.test(match)) {
+                        if (/:$/.test(match)) {
+                            cls = 'json-key';
+                        } else {
+                            cls = 'json-string';
+                        }
+                    } else if (/true|false/.test(match)) {
+                        cls = 'json-boolean';
+                    } else if (/null/.test(match)) {
+                        cls = 'json-null';
+                    }
+                    return `<span class="${cls}">${match}</span>`;
+                }
+            );
+        }
+
         async function setupCognitoClient(identityPoolId) {
             try {
                 updateStatus('Setting up Cognito authentication...');
                 
-                // Initialize Cognito client
                 cognitoClient = new AWS.CognitoIdentity();
                 
-                // Get identity ID
                 const identityResponse = await cognitoClient.getId({
                     IdentityPoolId: identityPoolId,
                     Logins: {}
                 }).promise();
                 
-                // Get credentials for the identity
                 const credentialsResponse = await cognitoClient.getCredentialsForIdentity({
                     IdentityId: identityResponse.IdentityId,
                     Logins: {}
                 }).promise();
                 
-                // Configure AWS credentials
                 AWS.config.credentials = new AWS.Credentials({
                     accessKeyId: credentialsResponse.Credentials.AccessKeyId,
                     secretAccessKey: credentialsResponse.Credentials.SecretKey,
                     sessionToken: credentialsResponse.Credentials.SessionToken
                 });
                 
-                // Initialize CloudWatch Logs client with new credentials
                 cloudWatchLogs = new AWS.CloudWatchLogs();
                 
                 updateStatus('Cognito authentication successful');
@@ -155,13 +307,11 @@
                 return;
             }
 
-            // Setup Cognito authentication
             const authSuccess = await setupCognitoClient(identityPoolId);
             if (!authSuccess) {
                 return;
             }
 
-            // Verify log group exists
             try {
                 const data = await cloudWatchLogs.describeLogGroups({
                     logGroupNamePrefix: logGroupName
@@ -246,7 +396,8 @@
                     return {
                         timestamp: parsed.timestamp || parsed.time || parsed['@timestamp'],
                         level: parsed.level || parsed.severity || parsed.log_level || 'INFO',
-                        message: parsed.message || parsed.msg || message
+                        message: parsed.message || parsed.msg || message,
+                        raw: parsed
                     };
                 }
             } catch (e) {
@@ -257,7 +408,8 @@
             return {
                 timestamp: null,
                 level: levelMatch ? levelMatch[1].toUpperCase() : 'INFO',
-                message: message
+                message: message,
+                raw: null
             };
         }
 
@@ -269,14 +421,32 @@
             const timestamp = new Date(event.timestamp).toISOString();
             const parsed = parseLogMessage(event.message);
             
+            let content = parsed.message;
+            if (parsed.raw) {
+                content = `<div class="json-content">${formatJSON(parsed.raw)}</div>`;
+            }
+            
             logEntry.innerHTML = `
                 <span class="timestamp">[${timestamp}]</span>
-                <span class="${parsed.level.toLowerCase()}">${parsed.level.padEnd(7)}</span>
-                ${parsed.message}
+                <span class="log-level ${parsed.level.toLowerCase()}">${parsed.level}</span>
+                <span class="log-content">${content}</span>
             `;
 
             logContainer.appendChild(logEntry);
-            logContainer.scrollTop = logContainer.scrollHeight;
+            logCount++;
+            updateLogCount();
+
+            if (autoScroll) {
+                logContainer.scrollTop = logContainer.scrollHeight;
+            }
+
+            // Add click handler for log entry
+            logEntry.addEventListener('click', () => {
+                document.querySelectorAll('.log-entry').forEach(entry => {
+                    entry.classList.remove('selected');
+                });
+                logEntry.classList.add('selected');
+            });
         }
     </script>
 </body>
